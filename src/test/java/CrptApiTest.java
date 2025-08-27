@@ -1,5 +1,3 @@
-import static org.junit.jupiter.api.Assertions.*;
-
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -11,8 +9,11 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 class CrptApiTest {
     private HttpServer server;
@@ -89,5 +90,97 @@ class CrptApiTest {
         CrptApi.DocumentId id = api.createIntroduceGoods(minimalDoc(), "SIG", "milk");
 
         assertEquals("11111111-2222-3333-4444-555555555555", id.value);
+    }
+
+    @Test
+    void unauthorizedThrowsAuthExceptionTest() {
+        HttpServer s = startServer(401, "{\"error_message\":\"Unauthorized\"}");
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 10, baseUri(s), () -> "bad");
+
+        assertThrows(CrptApi.AuthException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+    }
+
+    @Test
+    void clientErrorThrowsApiExceptionTest() {
+        HttpServer s = startServer(422, "{\"error_message\":\"Validation failed\"}");
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 10, baseUri(s), () -> "token");
+
+        assertThrows(CrptApi.ApiException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+    }
+
+    @Test
+    void serverErrorThrowsTransportExceptionTest() {
+        HttpServer s = startServer(500, "{\"error_message\":\"Oops\"}");
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 10, baseUri(s), () -> "token");
+
+        assertThrows(CrptApi.TransportException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+    }
+
+    @Test
+    void rateLimiterBlocksSecondCallAboutOneSecondTest() {
+        HttpServer s = startServer(200, "{\"value\":\"id\"}");
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 1, baseUri(s), () -> "token");
+
+        long t0 = System.nanoTime();
+        api.createIntroduceGoods(minimalDoc(), "SIG", "milk");
+        api.createIntroduceGoods(minimalDoc(), "SIG", "milk");
+        long ms = Duration.ofNanos(System.nanoTime() - t0).toMillis();
+
+        assertTrue(ms >= 900, "Expected ~1s due to rate limiter, but was " + ms + "ms");
+    }
+
+    @Test
+    void validationNullDocumentThrowsIAETest() {
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5, () -> "token");
+        assertThrows(IllegalArgumentException.class,
+                () -> api.createIntroduceGoods(null, "SIG", "milk"));
+    }
+
+    @Test
+    void validationBlankTokenThrowsIAEBeforeNetworkTest() {
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5, URI.create("http://localhost:1"), () -> "");
+        assertThrows(IllegalArgumentException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+    }
+
+    @Test
+    void twoHundredsWithEmptyIdThrowsTransportExceptionTest() {
+        HttpServer s = startServer(200, "{\"value\":\"\"}");
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 10, baseUri(s), () -> "token");
+        assertThrows(CrptApi.TransportException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+    }
+
+    @Test
+    void validationBlankSignatureThrowsIAETest() {
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5, () -> "token");
+        assertThrows(IllegalArgumentException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "   ", "milk"));
+    }
+
+    @Test
+    void validationBlankProductGroupThrowsIAETest() {
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5, () -> "token");
+        assertThrows(IllegalArgumentException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", " "));
+    }
+
+    @Test
+    void ioErrorWrapsToTransportExceptionTest() {
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5, URI.create("http://localhost:1"), () -> "token");
+        assertThrows(CrptApi.TransportException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+    }
+
+    @Test
+    void clientErrorWithoutBodyUsesHttpCodeInMessageTest() {
+        HttpServer s = startServer(400, "");
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 10, baseUri(s), () -> "token");
+        CrptApi.ApiException ex = assertThrows(CrptApi.ApiException.class,
+                () -> api.createIntroduceGoods(minimalDoc(), "SIG", "milk"));
+        assertTrue(ex.getMessage().startsWith("HTTP 400"));
     }
 }
